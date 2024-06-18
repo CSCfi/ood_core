@@ -1,8 +1,13 @@
-require "time"
 require 'etc'
+require 'json'
+require 'jwt'
+require 'net/http'
+require 'net/http/post/multipart'
 require "ood_core/refinements/hash_extensions"
 require "ood_core/refinements/array_extensions"
 require "ood_core/job/adapters/helper"
+require 'time'
+require 'uri'
 
 module OodCore
   module Job
@@ -37,6 +42,228 @@ module OodCore
           def initialize(machine: nil, endpoint: nil)
             @machine              = machine && machine.to_s
             @endpoint             = endpoint && endpoint.to_s
+            @client_id            = ENV['FIRECREST_CLIENT_ID']
+            @client_secret        = ENV['FIRECREST_CLIENT_SECRET']
+            @token                = nil
+            @token_expiration     = nil
+          end
+
+          # Submit a job with a local script file to the batch server
+          # @example
+          #   my_batch.submit_job("/path/to/script.sh")
+          # @raise FIXME
+          # @return [void]
+          def submit_job(script_path)
+            response = http_post(
+              "#{@firecrest_uri}/compute/jobs/upload",
+              headers: build_headers,
+              files: { "file" => script_path }
+            )
+            task_id = parse_response(response, "task_id")
+            wait_task_result(task_id, 200)
+          end
+
+          # Delete a specified job from batch server
+          # @example Delete job "1234"
+          #   my_batch.delete_job("1234")
+          # @param id [#to_s] the id of the job
+          # @raise FIXME
+          # @return [void]
+          def delete_job(job_id)
+            response = http_delete("#{@firecrest_uri}/compute/jobs/#{job_id}", headers: build_headers)
+            task_id = parse_response(response, "task_id")
+            res = wait_task_result(task_id, 200)
+          end
+
+          def get_active_jobs(job_ids: [])
+            job_ids_str = job_ids.join(',')
+            params = !job_ids.empty? ? { "jobs" => job_ids_str } : {}
+            response = http_get("#{@firecrest_uri}/compute/jobs", headers: build_headers, params: params)
+            task_id = parse_response(response, "task_id")
+            res = wait_task_result(task_id, 200).values
+          end
+
+          def get_jobs(job_ids: [])
+            job_ids_str = job_ids.join(',')
+            params = !job_ids.empty? ? { "jobs" => job_ids_str } : {}
+            response = http_get("#{@firecrest_uri}/compute/acct", headers: build_headers, params: params)
+            task_id = parse_response(response, "task_id")
+            res = wait_task_result(task_id, 200)
+            # When there are no jobs, the response is {}, instead of empty list
+            res.empty? ? [] : res
+          end
+
+          def get_nodes
+            response = http_get("#{@firecrest_uri}/compute/nodes", headers: build_headers)
+            task_id = parse_response(response, "task_id")
+            res = wait_task_result(task_id, 200)
+          end
+
+          def get_groups
+            response = http_get("#{@firecrest_uri}/utilities/whoami", headers: build_headers, params: { "groups" => true })
+            parse_response(response, "output")["groups"]
+          end
+
+          STATE_MAP = {
+            'BOOT_FAIL' => :completed,
+            'CANCELLED' => :completed,
+            'COMPLETED' => :completed,
+            'DEADLINE' => :completed,
+            'CONFIGURING' => :queued,
+            'COMPLETING' => :running,
+            'FAILED'  => :completed,
+            'NODE_FAIL' => :completed,
+            'PENDING' => :queued,
+            'PREEMPTED' => :suspended,
+            'REVOKEDRV' => :completed,
+            'RUNNING'  => :running,
+            'SPECIAL_EXIT' => :completed,
+            'STOPPED' => :running,
+            'SUSPENDED'  => :suspended,
+            'TIMEOUT' => :completed,
+            'OUT_OF_MEMORY' => :completed
+          }
+
+          def slurm_state_to_ood_state(state)
+            STATE_MAP.each do |key, value|
+              return value if state_string.include?(key)
+            end
+            :undetermined
+          end
+
+          def slurm_state_pending(state)
+            pending_states = [
+              'COMPLETING',
+              'CONFIGURING',
+              'PENDING',
+              'RESV_DEL_HOLD',
+              'REQUEUE_FED',
+              'REQUEUE_HOLD',
+              'REQUEUED',
+              'RESIZING',
+              'REVOKED',
+              'SIGNALING',
+              'SPECIAL_EXIT',
+              'STAGE_OUT',
+              'STOPPED',
+              'SUSPENDED'
+            ]
+
+            if state
+              state.split(',').any? { |s| pending_states.include?(s) }
+            else
+              false
+            end
+          end
+
+
+          private
+
+          def token_expired?
+            return true unless @token_expiration
+            Time.now >= @token_expiration
+          end
+
+          def decode_token_expiration(token)
+            decoded_token = JWT.decode(token, nil, false)
+            exp = decoded_token[0]['exp']
+            @token_expiration = Time.at(exp)
+          end
+
+          def get_token
+            return @token if @token && !token_expired?
+
+            uri = URI(@token_uri)
+            data = {
+              grant_type: 'client_credentials',
+              client_id: @client_id,
+              client_secret: @client_secret
+            }
+
+            request = Net::HTTP::Post.new(uri)
+            request['Content-Type'] = 'application/x-www-form-urlencoded'
+            request.set_form_data(data)
+            response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
+              http.request(request)
+            end
+            raise TokenError, "Failed to obtain token: #{response.body}" if response.code.to_i != 200
+
+            json_response = JSON.parse(response.body)
+            @token = json_response["access_token"]
+            decode_token_expiration(@token)
+            @token
+          rescue => e
+            raise TokenError, "Token error: #{e.message}"
+          end
+
+          def build_headers
+            { 'Authorization' => "Bearer #{get_token}", 'X-Machine-Name' => @system_name }
+          end
+
+          def http_get(url, headers: {}, params: {})
+            uri = URI(url)
+            uri.query = URI.encode_www_form(params) unless params.empty?
+            request = Net::HTTP::Get.new(uri)
+            headers.each { |key, value| request[key] = value }
+
+            response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
+              http.request(request)
+            end
+            raise HttpError, "Error: #{response.code} #{response.body}" if response.code.to_i >= 400
+            response
+          end
+
+          def http_delete(url, headers: {})
+            uri = URI(url)
+            request = Net::HTTP::Delete.new(uri)
+            headers.each { |key, value| request[key] = value }
+
+            response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
+              http.request(request)
+            end
+            raise HttpError, "Error: #{response.code} #{response.body}" if response.code.to_i >= 400
+            response
+          end
+
+          def http_post(url, headers:, data: {}, files: {})
+            uri = URI.parse(url)
+
+            # Prepare the form data, including files
+            form_data = data
+            files.each do |key, file_path|
+              form_data[key] = Multipart::Post::UploadIO.new(File.open(file_path), 'application/octet-stream', File.basename(file_path))
+            end
+
+            request = Net::HTTP::Post::Multipart.new(uri.path, form_data)
+            headers.each do |key, value|
+              request[key] = value
+            end
+
+            http = Net::HTTP.new(uri.host, uri.port)
+            http.use_ssl = (uri.scheme == 'https')
+            resp = http.request(request)
+            raise HttpError, "Error: #{resp.code} #{resp.body}" if resp.code.to_i >= 400
+            resp
+          end
+
+          def parse_response(response, key)
+            JSON.parse(response.body)[key]
+          end
+
+          def wait_task_result(task_id, final_status)
+            task = get_task(task_id)
+            while task["status"].to_i < final_status
+              # TODO: change this to maybe exponential backoff (?)
+              sleep 1
+              task = get_task(task_id)
+            end
+            raise TaskError, "Error in task: #{task['data']}" if task["status"].to_i >= 400
+            task["data"]
+          end
+
+          def get_task(task_id)
+            response = http_get("#{@firecrest_uri}/tasks/#{task_id}", headers: build_headers)
+            parse_response(response, "task")
           end
         end
 
@@ -72,7 +299,17 @@ module OodCore
         # Retrieve info about active and total cpus, gpus, and nodes
         # @return [Hash] information about cluster usage
         def cluster_info
-          raise NotImplementedError, "cluster_info not implemented in firecrest adapter yet"
+          # TODO: We csn get some information from get_nodes
+          node_info = @firecrest.get_nodes
+          # TODO: We have the state of each node, so proably we can get this information
+          number_of_active_nodes = nil
+          ClusterInfo.new(active_nodes: number_of_active_nodes,
+                          total_nodes: node_info.length,
+                          active_processors: nil,
+                          total_processors: nil,
+                          active_gpus: nil,
+                          total_gpus: nil
+          )
         end
 
         # Retrieve info for all jobs from the resource manager
@@ -80,7 +317,10 @@ module OodCore
         # @return [Array<Info>] information describing submitted jobs
         # @see Adapter#info_all
         def info_all(attrs: nil)
-          raise NotImplementedError, "info_all not implemented in firecrest adapter yet"
+          # Cannot get information for active jobs that don't belong to the user
+          @firecrest.get_jobs.map do |v|
+            parse_job_info(v)
+          end
         end
 
         # Retrieve job info from the resource manager
@@ -89,7 +329,34 @@ module OodCore
         # @return [Info] information describing submitted job
         # @see Adapter#info
         def info(id)
-          raise NotImplementedError, "info not implemented in firecrest adapter yet"
+          id = id.to_s
+          info_ary = @firecrest.get_jobs([id]).map do |v|
+            parse_job_info(v)
+          end
+
+          # If no job was found we assume that it has completed
+          info_ary.empty? ? Info.new(id: id, status: :completed) : info_ary.first
+        end
+
+        def parse_job_info(v)
+          Info.new(
+            id: v['job_id'],
+            status: @firecrest.slurm_state_to_ood_state(v['state']),
+            allocated_nodes: parse_nodes(v['nodelist']),
+            submit_host: nil,
+            job_name: v['name'],
+            job_owner: v['user'],
+            accounting_id: nil,
+            procs: nil,
+            queue_name: v['partition'],
+            wallclock_time: duration_in_seconds(v['elapsed_time']),
+            wallclock_limit: nil,
+            cpu_time: nil,
+            submission_time: nil,
+            dispatch_time: v['start_time'] == "N/A" ? nil : Time.parse(v['start_time']),
+            native: v,
+            gpus: nil
+          )
         end
 
         # Retrieve job status from resource manager
@@ -98,7 +365,13 @@ module OodCore
         # @return [Status] status of job
         # @see Adapter#status
         def status(id)
-          raise NotImplementedError, "status not implemented in firecrest adapter yet"
+          jobs = @firecrest.get_jobs([id])
+          # TODO: need to check how firecrest deals with job arrays
+          if job = jobs.detect { |job| job["job_id"] == id }
+            Status.new(state: slurm_state_to_ood_state(job["state"]))
+          else
+            Status.new(state: :undetermined)
+          end
         end
 
         # Put the submitted job on hold
@@ -125,7 +398,7 @@ module OodCore
         # @return [void]
         # @see Adapter#delete
         def delete(id)
-          raise NotImplementedError, "delete not implemented in firecrest adapter yet"
+          @firecrest.delete_job(id)
         end
 
       end
