@@ -25,6 +25,8 @@ Gem::Specification.new do |spec|
   spec.add_runtime_dependency "ood_support", "~> 0.0.2"
   spec.add_runtime_dependency "ffi", "~> 1.9", ">= 1.9.6"
   spec.add_runtime_dependency "rexml", "~> 3.2"
+  spec.add_runtime_dependency "jwt", "~> 2.8"
+  spec.add_runtime_dependency "multipart-post", "~> 2.4"
   spec.add_development_dependency "bundler", "~> 2.1"
   spec.add_development_dependency "rake", "~> 13.1.0"
   spec.add_development_dependency "rspec", "~> 3.0"

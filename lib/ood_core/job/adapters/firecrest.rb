@@ -17,7 +17,7 @@ module OodCore
       # Build the FirecREST adapter from a configuration
       def self.build_firecrest(config)
         c = config.to_h.symbolize_keys
-        machine              = c.fetch(:cluster, nil)
+        machine              = c.fetch(:machine, nil)
         endpoint             = c.fetch(:endpoint, nil)
         firecrest = Adapters::FirecREST::Batch.new(machine: machine, endpoint: endpoint)
         Adapters::FirecREST.new(firecrest: firecrest)
@@ -38,12 +38,16 @@ module OodCore
           attr_reader :endpoint
 
           class Error < StandardError; end
+          class TokenError < Error; end
+          class HttpError < Error; end
+          class TaskError < Error; end
 
           def initialize(machine: nil, endpoint: nil)
             @machine              = machine && machine.to_s
-            @endpoint             = endpoint && endpoint.to_s
+            @firecrest_uri        = endpoint && endpoint.to_s
             @client_id            = ENV['FIRECREST_CLIENT_ID']
             @client_secret        = ENV['FIRECREST_CLIENT_SECRET']
+            @token_uri            = ENV['FIRECREST_TOKEN_URI']
             @token                = nil
             @token_expiration     = nil
           end
@@ -197,7 +201,7 @@ module OodCore
           end
 
           def build_headers
-            { 'Authorization' => "Bearer #{get_token}", 'X-Machine-Name' => @system_name }
+            { 'Authorization' => "Bearer #{get_token}", 'X-Machine-Name' => @machine }
           end
 
           def http_get(url, headers: {}, params: {})
