@@ -130,7 +130,7 @@ module OodCore
 
           def slurm_state_to_ood_state(state)
             STATE_MAP.each do |key, value|
-              return value if state_string.include?(key)
+              return value if state.include?(key)
             end
             :undetermined
           end
@@ -334,7 +334,7 @@ module OodCore
         # @see Adapter#info
         def info(id)
           id = id.to_s
-          info_ary = @firecrest.get_jobs([id]).map do |v|
+          info_ary = @firecrest.get_jobs(job_ids: [id.to_s]).map do |v|
             parse_job_info(v)
           end
 
@@ -369,7 +369,7 @@ module OodCore
         # @return [Status] status of job
         # @see Adapter#status
         def status(id)
-          jobs = @firecrest.get_jobs([id])
+          jobs = @firecrest.get_jobs([id.to_s])
           # TODO: need to check how firecrest deals with job arrays
           if job = jobs.detect { |job| job["job_id"] == id }
             Status.new(state: slurm_state_to_ood_state(job["state"]))
@@ -403,6 +403,36 @@ module OodCore
         # @see Adapter#delete
         def delete(id)
           @firecrest.delete_job(id)
+        end
+
+        # Convert host list string to individual nodes
+        # "em082"
+        # "em[014,055-056,161]"
+        # "c457-[011-012]"
+        # "c438-[062,104]"
+        # "c427-032,c429-002"
+        def parse_nodes(node_list)
+          node_list.to_s.scan(/([^,\[]+)(?:\[([^\]]+)\])?/).map do |prefix, range|
+            if range
+              range.split(",").map do |x|
+                x =~ /^(\d+)-(\d+)$/ ? ($1..$2).to_a : x
+              end.flatten.map do |n|
+                { name: prefix + n, procs: nil }
+              end
+            elsif prefix
+              [ { name: prefix, procs: nil } ]
+            else
+              []
+            end
+          end.flatten
+        end
+
+        # Convert duration to seconds
+        def duration_in_seconds(time)
+          return 0 if time.nil?
+          time, days = time.split("-").reverse
+          days.to_i * 24 * 3600 +
+            time.split(':').map { |v| v.to_i }.inject(0) { |total, v| total * 60 + v }
         end
 
       end
