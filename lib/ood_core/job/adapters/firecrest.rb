@@ -326,9 +326,16 @@ module OodCore
           end
           content << "#SBATCH -J #{script.job_name}\n" unless script.job_name.nil?
           content << "#SBATCH -i #{script.input_path}\n" unless script.input_path.nil?
+          content << "#SBATCH -o #{script.output_path}\n" unless script.output_path.nil?
+          content << "#SBATCH -e #{script.error_path}\n" unless script.error_path.nil?
+          content << "#SBATCH --reservation #{script.reservation_id}\n" unless script.reservation_id.nil?
+          content << "#SBATCH --priority #{script.priority}\n" unless script.priority.nil?
+          content << "#SBATCH -a #{script.job_array_request}\n" unless script.job_array_request.nil?
           content << "#SBATCH -A#{script.accounting_id}\n" unless script.accounting_id.nil?
           content << "#SBATCH -t#{seconds_to_duration(script.wall_time)}\n" unless script.wall_time.nil?
           content << "#SBATCH -p#{script.queue_name}\n" unless script.queue_name.nil?
+          content << "#SBATCH --qos #{script.qos}\n" unless script.qos.nil?
+          content << "#SBATCH --gpus-per-node #{script.gpus-per-node}\n" unless script.gpus-per-node.nil?
 
           content << "#SBATCH --dependency=after:#{after.join(":")}\n" unless after.empty?
           content << "#SBATCH --dependency=afterok:#{afterok.join(":")}\n" unless afterok.empty?
