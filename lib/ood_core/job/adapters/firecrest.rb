@@ -204,17 +204,27 @@ module OodCore
             { 'Authorization' => "Bearer #{get_token}", 'X-Machine-Name' => @machine }
           end
 
-          def http_get(url, headers: {}, params: {})
+          def http_get(url, headers: {}, params: {}, max_retries: 5)
             uri = URI(url)
             uri.query = URI.encode_www_form(params) unless params.empty?
             request = Net::HTTP::Get.new(uri)
             headers.each { |key, value| request[key] = value }
+            retries = 0
+            while retries <= max_retries
+              response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
+                http.request(request)
+              end
 
-            response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
-              http.request(request)
+              if response.code.to_i == 429
+                retry_after = response['RateLimit-Reset'].to_i
+                sleep(retry_after > 0 ? retry_after : 1)
+                retries += 1
+              elsif response.code.to_i >= 400
+                raise HttpError, "Error: #{response.code} #{response.body}"
+              else
+                return response
+              end
             end
-            raise HttpError, "Error: #{response.code} #{response.body}" if response.code.to_i >= 400
-            response
           end
 
           def http_delete(url, headers: {})
@@ -297,13 +307,56 @@ module OodCore
         #   job
         # @see Adapter#submit
         def submit(script, after: [], afterok: [], afternotok: [], afterany: [])
-          raise NotImplementedError, "submit not implemented in firecrest adapter yet"
+          content = '#!/bin/bash -l\n\n'
+
+          after      = Array(after).map(&:to_s)
+          afterok    = Array(afterok).map(&:to_s)
+          afternotok = Array(afternotok).map(&:to_s)
+          afterany   = Array(afterany).map(&:to_s)
+
+          content << "#SBATCH --mail-user=#{script.email.join(",")}\n" unless script.email.nil?
+          if script.email_on_started && script.email_on_terminated
+            content << "#SBATCH --mail-type ALL\n"
+          elsif script.email_on_started
+            content << "#SBATCH --mail-type BEGIN\n"
+          elsif script.email_on_terminated
+            content << "#SBATCH --mail-type END\n"
+          elsif script.email_on_started == false && script.email_on_terminated == false
+            content << "#SBATCH --mail-type NONE\n"
+          end
+          content << "#SBATCH -J #{script.job_name}\n" unless script.job_name.nil?
+          content << "#SBATCH -i #{script.input_path}\n" unless script.input_path.nil?
+          content << "#SBATCH -A#{script.accounting_id}\n" unless script.accounting_id.nil?
+          content << "#SBATCH -t#{seconds_to_duration(script.wall_time)}\n" unless script.wall_time.nil?
+          content << "#SBATCH -p#{script.queue_name}\n" unless script.queue_name.nil?
+
+          content << "#SBATCH --dependency=after:#{after.join(":")}\n" unless after.empty?
+          content << "#SBATCH --dependency=afterok:#{afterok.join(":")}\n" unless afterok.empty?
+          content << "#SBATCH --dependency=afternotok:#{afternotok.join(":")}\n" unless afternotok.empty?
+          content << "#SBATCH --dependency=afterany:#{afterany.join(":")}\n" unless afterany.empty?
+
+          # TODO: add env variables?
+
+          content << script.content
+
+          script_file = make_script_file(content)
+          job_info = @firecrest.submit_job(script_file.path)
+          job_info["jobid"]
+        end
+
+        # helper to make a script file. We can't pipe it into ccq so we have to
+        # write a file.
+        def make_script_file(content)
+          file = Tempfile.new('firecrest_ood_script_')
+          file.write(content.to_s)
+          file.flush
+          file
         end
 
         # Retrieve info about active and total cpus, gpus, and nodes
         # @return [Hash] information about cluster usage
         def cluster_info
-          # TODO: We csn get some information from get_nodes
+          # TODO: We can get some information from get_nodes
           node_info = @firecrest.get_nodes
           # TODO: We have the state of each node, so proably we can get this information
           number_of_active_nodes = nil
@@ -322,7 +375,20 @@ module OodCore
         # @see Adapter#info_all
         def info_all(attrs: nil)
           # Cannot get information for active jobs that don't belong to the user
-          @firecrest.get_jobs.map do |v|
+          @firecrest.get_active_jobs.map do |v|
+            parse_job_info(v)
+          end
+        end
+
+        # Retrieve info for all jobs for a given owner or owners from the
+        # resource manager
+        # @param owner [#to_s, Array<#to_s>] the owner(s) of the jobs
+        # @raise [JobAdapterError] if something goes wrong getting job info
+        # @return [Array<Info>] information describing submitted jobs
+        def info_where_owner(owner, attrs: nil)
+          # Cannot get information for active jobs that don't belong to the user,
+          # so we ignore the owner parameter
+          @firecrest.get_active_jobs.map do |v|
             parse_job_info(v)
           end
         end
@@ -334,7 +400,7 @@ module OodCore
         # @see Adapter#info
         def info(id)
           id = id.to_s
-          info_ary = @firecrest.get_jobs(job_ids: [id.to_s]).map do |v|
+          info_ary = @firecrest.get_active_jobs(job_ids: [id.to_s]).map do |v|
             parse_job_info(v)
           end
 
@@ -344,11 +410,13 @@ module OodCore
 
         def parse_job_info(v)
           Info.new(
-            id: v['job_id'],
+            id: v['jobid'],
             status: @firecrest.slurm_state_to_ood_state(v['state']),
             allocated_nodes: parse_nodes(v['nodelist']),
             submit_host: nil,
             job_name: v['name'],
+            # TODO: We need to map this to the local user if we want to be
+            # able to cancel the job in the activejobs app
             job_owner: v['user'],
             accounting_id: nil,
             procs: nil,
@@ -357,7 +425,7 @@ module OodCore
             wallclock_limit: nil,
             cpu_time: nil,
             submission_time: nil,
-            dispatch_time: v['start_time'] == "N/A" ? nil : Time.parse(v['start_time']),
+            dispatch_time: nil,
             native: v,
             gpus: nil
           )
@@ -369,7 +437,7 @@ module OodCore
         # @return [Status] status of job
         # @see Adapter#status
         def status(id)
-          jobs = @firecrest.get_jobs([id.to_s])
+          jobs = @firecrest.get_active_jobs(job_ids: [id.to_s])
           # TODO: need to check how firecrest deals with job arrays
           if job = jobs.detect { |job| job["job_id"] == id }
             Status.new(state: slurm_state_to_ood_state(job["state"]))
@@ -402,7 +470,8 @@ module OodCore
         # @return [void]
         # @see Adapter#delete
         def delete(id)
-          @firecrest.delete_job(id)
+          Rails.logger.info("Deleting job #{id.gsub('.', '_')}")
+          @firecrest.delete_job(id.gsub('.', '_'))
         end
 
         # Convert host list string to individual nodes
