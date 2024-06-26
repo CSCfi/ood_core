@@ -227,37 +227,64 @@ module OodCore
             end
           end
 
-          def http_delete(url, headers: {})
+          def http_delete(url, headers: {}, max_retries: 5)
             uri = URI(url)
             request = Net::HTTP::Delete.new(uri)
             headers.each { |key, value| request[key] = value }
 
-            response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
-              http.request(request)
+            retries = 0
+            while retries <= max_retries
+              response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
+                http.request(request)
+              end
+
+              if response.code.to_i == 429
+                retry_after = response['RateLimit-Reset'].to_i
+                sleep(retry_after > 0 ? retry_after : 1)
+                retries += 1
+              elsif response.code.to_i >= 400
+                raise HttpError, "Error: #{response.code} #{response.body}"
+              else
+                return response
+              end
             end
-            raise HttpError, "Error: #{response.code} #{response.body}" if response.code.to_i >= 400
-            response
           end
 
-          def http_post(url, headers:, data: {}, files: {})
+          def http_post(url, headers:, data: {}, files: {}, max_retries: 5)
             uri = URI.parse(url)
 
-            # Prepare the form data, including files
-            form_data = data
-            files.each do |key, file_path|
-              form_data[key] = Multipart::Post::UploadIO.new(File.open(file_path), 'application/octet-stream', File.basename(file_path))
-            end
+            retries = 0
+            while retries <= max_retries
+              # Prepare the form data, including files
+              form_data = data
+              files.each do |key, file_path|
+                if file_path.instance_of?(StringIO)
+                  file_path.rewind # Reset StringIO pointer
+                  form_data[key] = Multipart::Post::UploadIO.new(file_path, 'application/octet-stream', "job_script_content.sh")
+                else
+                  form_data[key] = Multipart::Post::UploadIO.new(File.open(file_path), 'application/octet-stream', File.basename(file_path))
+                end
+              end
 
-            request = Net::HTTP::Post::Multipart.new(uri.path, form_data)
-            headers.each do |key, value|
-              request[key] = value
-            end
+              request = Net::HTTP::Post::Multipart.new(uri.path, form_data)
+              headers.each do |key, value|
+                request[key] = value
+              end
 
-            http = Net::HTTP.new(uri.host, uri.port)
-            http.use_ssl = (uri.scheme == 'https')
-            resp = http.request(request)
-            raise HttpError, "Error: #{resp.code} #{resp.body}" if resp.code.to_i >= 400
-            resp
+              response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
+                http.request(request)
+              end
+
+              if response.code.to_i == 429
+                retry_after = response['RateLimit-Reset'].to_i
+                sleep(retry_after > 0 ? retry_after : 1)
+                retries += 1
+              elsif response.code.to_i >= 400
+                raise HttpError, "Error: #{response.code} #{response.body}"
+              else
+                return response
+              end
+            end
           end
 
           def parse_response(response, key)
