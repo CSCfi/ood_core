@@ -42,14 +42,15 @@ module OodCore
           class HttpError < Error; end
           class TaskError < Error; end
 
+          # Access tokens re-used while they are valid.
+          @@token = {}
+
           def initialize(machine: nil, endpoint: nil)
             @machine              = machine && machine.to_s
             @firecrest_uri        = endpoint && endpoint.to_s
             @client_id            = ENV['FIRECREST_CLIENT_ID']
             @client_secret        = ENV['FIRECREST_CLIENT_SECRET']
             @token_uri            = ENV['FIRECREST_TOKEN_URI']
-            @token                = nil
-            @token_expiration     = nil
           end
 
           # Submit a job with a local script file to the batch server
@@ -163,20 +164,31 @@ module OodCore
 
           private
 
-          def token_expired?
-            return true unless @token_expiration
-            Time.now >= @token_expiration
+          # FirecREST access token
+          class Token
+            attr_reader :token
+            attr_reader :expiry
+
+            def initialize(token)
+              decoded_token = JWT.decode(token, nil, false)
+              @expiry = Time.at(decoded_token[0]['exp'])
+              @token = token
+            end
+
+            def expired?
+              Time.now >= expiry
+            end
+
+            def to_s
+              token.to_s
+            end
           end
 
-          def decode_token_expiration(token)
-            decoded_token = JWT.decode(token, nil, false)
-            exp = decoded_token[0]['exp']
-            @token_expiration = Time.at(exp)
-          end
-
-          def get_token
-            return @token if @token && !token_expired?
-
+          def token
+            # Job adapter is instantiated each time, need to cache tokens in a class variable.
+            # Class variable shared between machines that use this adapter, need machine-specific identifier.
+            t = @@token[machine]
+            return t if t && !t.expired?
             uri = URI(@token_uri)
             data = {
               grant_type: 'client_credentials',
@@ -193,15 +205,14 @@ module OodCore
             raise TokenError, "Failed to obtain token: #{response.body}" if response.code.to_i != 200
 
             json_response = JSON.parse(response.body)
-            @token = json_response["access_token"]
-            decode_token_expiration(@token)
-            @token
+            token = Token.new(json_response["access_token"])
+            @@token[machine] = token
           rescue => e
             raise TokenError, "Token error: #{e.message}"
           end
 
           def build_headers
-            { 'Authorization' => "Bearer #{get_token}", 'X-Machine-Name' => @machine }
+            { 'Authorization' => "Bearer #{token}", 'X-Machine-Name' => @machine }
           end
 
           def http_get(url, headers: {}, params: {}, max_retries: 5)
