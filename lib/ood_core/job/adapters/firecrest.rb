@@ -9,6 +9,8 @@ require "ood_core/job/adapters/helper"
 require 'time'
 require 'uri'
 
+require 'rubygems/package'
+
 module OodCore
   module Job
     class Factory
@@ -44,6 +46,9 @@ module OodCore
 
           # Access tokens re-used while they are valid.
           @@token = {}
+
+          # Cache username for machine(s).
+          @@user = {}
 
           def initialize(machine: nil, endpoint: nil)
             @machine              = machine && machine.to_s
@@ -107,6 +112,53 @@ module OodCore
           def get_groups
             response = http_get("#{@firecrest_uri}/utilities/whoami", headers: build_headers, params: { "groups" => true })
             parse_response(response, "output")["groups"]
+          end
+
+          def user
+            @@user[machine] ||= begin
+              response = http_get("#{@firecrest_uri}/utilities/whoami", headers: build_headers)
+              parse_response(response, "output")
+            end
+          end
+
+          # Stage job files to the cluster.
+          def stage(src, dst)
+            # Add all files for job to a tar file, and upload it.
+            # Extracted in the job script, TODO: add to job template?
+            src_path = File.expand_path(src)
+            files = Dir.glob("#{src_path}/**/*").select { |e| File.file? e }.to_a
+            File.open("#{File.expand_path(src)}.tar", "wb") do |file|
+              tar_writer = Gem::Package::TarWriter.new(file) do |tar|
+                files.each do |f|
+                  rel_file = f.sub(/^#{Regexp::escape(src_path)}\/?/, '')
+                  len = File.stat(f).size
+                  # TODO: preserve permissions
+                  # Execute permission needed for scripts.
+                  tar.add_file_simple(rel_file, 0700, len) do |io|
+                    IO.copy_stream(f, io)
+                  end
+                end
+              end
+            end
+            parse_response(http_post(
+              "#{@firecrest_uri}/utilities/mkdir",
+              headers: build_headers,
+              data: {
+                targetPath: dst.to_s,
+                p: "true"
+              }
+            ), "output")
+            parse_response(http_post(
+              "#{@firecrest_uri}/utilities/upload",
+              headers: build_headers,
+              data: { targetPath: dst.to_s },
+              files: { "file" => "#{src_path}.tar" }
+            ), "output")
+          end
+
+          def view(file)
+            response = http_get("#{@firecrest_uri}/utilities/view", headers: build_headers, params: { targetPath: file })
+            parse_response(response, "output")
           end
 
           STATE_MAP = {
@@ -390,6 +442,10 @@ module OodCore
         end
 
 
+        def stage(src, dst)
+          @firecrest.stage(src, dst)
+        end
+
         # Retrieve info about active and total cpus, gpus, and nodes
         # @return [Hash] information about cluster usage
         def cluster_info
@@ -430,6 +486,20 @@ module OodCore
           end
         end
 
+        # Info class with ood_connection_info defined
+        class FirecRESTJobInfo < OodCore::Job::Info
+          attr_reader :ood_connection_info
+          def initialize(options)
+            @ood_connection_info = options[:ood_connection_info]
+            super(**options)
+          end
+
+          def respond_to?(name, include_private = false)
+            return false if name == :ood_connection_info && ood_connection_info.nil?
+            super
+          end
+        end
+
         # Retrieve job info from the resource manager
         # @param id [#to_s] the id of the job
         # @raise [JobAdapterError] if something goes wrong getting job info
@@ -445,10 +515,22 @@ module OodCore
           info_ary.empty? ? Info.new(id: id, status: :completed) : info_ary.first
         end
 
+
         def parse_job_info(v)
-          Info.new(
+          status = @firecrest.slurm_state_to_ood_state(v['state'])
+          # Attempt to identify interactive app jobs and read the connection info.
+          begin
+            connect_file = File.join(File.dirname(v["job_file_out"]), "connection.yml")
+            if status == :running && @firecrest.user == v["user"] && /^(?:sys|usr|dev)\/[^\s\/]+\/(?:sys|usr|dev)\/[^\s\/]+$/.match(v['name'])
+              connection_info = OpenStruct.new(YAML.safe_load(@firecrest.view(connect_file)))
+            end
+          rescue => e
+          end
+
+
+          FirecRESTJobInfo.new(
             id: v['jobid'],
-            status: @firecrest.slurm_state_to_ood_state(v['state']),
+            status: status,
             allocated_nodes: parse_nodes(v['nodelist']),
             submit_host: nil,
             job_name: v['name'],
@@ -464,7 +546,8 @@ module OodCore
             submission_time: nil,
             dispatch_time: nil,
             native: v,
-            gpus: nil
+            gpus: nil,
+            ood_connection_info: connection_info
           )
         end
 
