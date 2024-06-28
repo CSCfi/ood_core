@@ -334,7 +334,7 @@ module OodCore
         #   job
         # @see Adapter#submit
         def submit(script, after: [], afterok: [], afternotok: [], afterany: [])
-          content = '#!/bin/bash -l\n\n'
+          content = "#!/bin/bash -l\n\n"
 
           after      = Array(after).map(&:to_s)
           afterok    = Array(afterok).map(&:to_s)
@@ -362,7 +362,6 @@ module OodCore
           content << "#SBATCH -t#{seconds_to_duration(script.wall_time)}\n" unless script.wall_time.nil?
           content << "#SBATCH -p#{script.queue_name}\n" unless script.queue_name.nil?
           content << "#SBATCH --qos #{script.qos}\n" unless script.qos.nil?
-          content << "#SBATCH --gpus-per-node #{script.gpus-per-node}\n" unless script.gpus-per-node.nil?
 
           content << "#SBATCH --dependency=after:#{after.join(":")}\n" unless after.empty?
           content << "#SBATCH --dependency=afterok:#{afterok.join(":")}\n" unless afterok.empty?
@@ -504,8 +503,8 @@ module OodCore
         # @return [void]
         # @see Adapter#delete
         def delete(id)
-          Rails.logger.info("Deleting job #{id.gsub('.', '_')}")
-          @firecrest.delete_job(id.gsub('.', '_'))
+          Rails.logger.info("Deleting job #{id.to_s.gsub('.', '_')}")
+          @firecrest.delete_job(id.to_s.gsub('.', '_'))
         end
 
         # Convert host list string to individual nodes
