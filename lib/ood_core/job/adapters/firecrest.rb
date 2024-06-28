@@ -62,7 +62,7 @@ module OodCore
             response = http_post(
               "#{@firecrest_uri}/compute/jobs/upload",
               headers: build_headers,
-              files: { "file" => script_path }
+              files: { "job_script_content.sh" => script_path }
             )
             task_id = parse_response(response, "task_id")
             wait_task_result(task_id, 200)
@@ -269,11 +269,12 @@ module OodCore
               # Prepare the form data, including files
               form_data = data
               files.each do |key, file_path|
-                if file_path.instance_of?(StringIO)
-                  file_path.rewind # Reset StringIO pointer
-                  form_data[key] = Multipart::Post::UploadIO.new(file_path, 'application/octet-stream', "job_script_content.sh")
+                form_data["file"] ||= []
+                if file_path.kind_of?(IO) || file_path.kind_of?(StringIO)
+                  file_path.rewind # Reset (String)IO pointer
+                  form_data["file"].push(Multipart::Post::UploadIO.new(file_path, 'application/octet-stream', key))
                 else
-                  form_data[key] = Multipart::Post::UploadIO.new(File.open(file_path), 'application/octet-stream', File.basename(file_path))
+                  form_data["file"].push(Multipart::Post::UploadIO.new(File.open(file_path), 'application/octet-stream', File.basename(file_path)))
                 end
               end
 
@@ -383,19 +384,11 @@ module OodCore
 
           content << script.content
 
-          script_file = make_script_file(content)
-          job_info = @firecrest.submit_job(script_file.path)
+          script_file = StringIO.new(content)
+          job_info = @firecrest.submit_job(script_file)
           job_info["jobid"]
         end
 
-        # helper to make a script file. We can't pipe it into ccq so we have to
-        # write a file.
-        def make_script_file(content)
-          file = Tempfile.new('firecrest_ood_script_')
-          file.write(content.to_s)
-          file.flush
-          file
-        end
 
         # Retrieve info about active and total cpus, gpus, and nodes
         # @return [Hash] information about cluster usage
