@@ -33,6 +33,8 @@ module OodCore
         using Refinements::HashExtensions
         using Refinements::ArrayExtensions
 
+        require "ood_core/job/adapters/firecrest/cluster_file"
+
         # @api private
         class Batch
 
@@ -380,6 +382,10 @@ module OodCore
           o = opts.to_h.symbolize_keys
 
           @firecrest = o.fetch(:firecrest) { raise ArgumentError, "No firecrest object specified. Missing argument: firecrest" }
+        end
+
+        def cluster_file(path)
+          ClusterFile.new(path, @firecrest)
         end
 
         # Submit a job with the attributes defined in the job template instance
