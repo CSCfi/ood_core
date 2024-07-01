@@ -163,6 +163,55 @@ module OodCore
             parse_response(response, "output")
           end
 
+          def list_files(target_path, show_hidden_files: false)
+            params = { 'targetPath' => target_path }
+            params["showhidden"] = show_hidden_files if show_hidden_files
+            response = http_get(
+              "#{@firecrest_uri}/utilities/ls",
+              headers: build_headers,
+              params: params
+            )
+            parse_response(response, "output")
+          end
+
+          def mkdir(target_path, create_intermediate_dirs: false)
+            data = { "targetPath" => target_path }
+            data["p"] = create_intermediate_dirs if create_intermediate_dirs
+            response = http_post(
+              "#{@firecrest_uri}/utilities/mkdir",
+              headers: build_headers,
+              data: data
+            )
+            parse_response(response, "output")
+          end
+
+          def mv(source_path, target_path)
+            data = {
+              "sourcePath" => source_path,
+              "targetPath" => target_path
+            }
+            response = http_put(
+              "#{@firecrest_uri}/utilities/rename",
+              headers: build_headers,
+              data: data
+            )
+            parse_response(response, "output")
+          end
+
+          def cp(source_path, target_path)
+            #TODO handle larger files through a job
+            data = {
+              "sourcePath" => source_path,
+              "targetPath" => target_path
+            }
+            response = http_post(
+              "#{@firecrest_uri}/utilities/copy",
+              headers: build_headers,
+              data: data
+            )
+            parse_response(response, "output")
+          end
+
           STATE_MAP = {
             'BOOT_FAIL' => :completed,
             'CANCELLED' => :completed,
@@ -333,6 +382,36 @@ module OodCore
               end
 
               request = Net::HTTP::Post::Multipart.new(uri.path, form_data)
+              headers.each do |key, value|
+                request[key] = value
+              end
+
+              response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
+                http.request(request)
+              end
+
+              if response.code.to_i == 429
+                retry_after = response['RateLimit-Reset'].to_i
+                sleep(retry_after > 0 ? retry_after : 1)
+                retries += 1
+              elsif response.code.to_i >= 400
+                raise HttpError, "Error: #{response.code} #{response.body}"
+              else
+                return response
+              end
+            end
+          end
+
+          def http_put(url, headers: {}, data: {}, max_retries: 5)
+            uri = URI.parse(url)
+
+            retries = 0
+            while retries <= max_retries
+              # Prepare the form data
+              form_data = data
+
+              request = Net::HTTP::Put.new(uri.path)
+              request.set_form_data(form_data)
               headers.each do |key, value|
                 request[key] = value
               end
