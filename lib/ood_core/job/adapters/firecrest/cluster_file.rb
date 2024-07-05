@@ -16,15 +16,34 @@ class OodCore::Job::Adapters::FirecREST::ClusterFile
   def raise_if_cant_access_directory_contents; end
 
   def directory?
-    true
+    info = adapter.file_info(path)
+    info.include?("directory") && !info.include?("symbolic link")
   end
 
   def ls
-    []
+    files = adapter.list_files(path, show_hidden_files: true)
+    files
+      .select { |file| file["type"] == "-" || file["type"] == "d" } # Ignore symlinks and other special files
+      .map do |file|
+        {
+          id:         path.join(file["name"]),
+          name:       file["name"],
+          size:       file['size'],
+          human_size: human_size(file),
+          directory:  file["type"] == "d",
+          date:       DateTime.parse(file['last_modified']).to_time.to_i,
+          owner:      file["user"],
+          mode:       '', # TODO: parse the mode
+          dev:        0
+        }
+    rescue => e
+      # Ignore file if parsing errors occur
+      nil
+    end.compact.sort_by { |p| p[:directory] ? 0 : 1 }
   end
 
-  def human_size
-    '-'
+  def human_size(file)
+    ::ApplicationController.helpers.number_to_human_size(file["size"], precision: 3)
   end
 
   def can_download_as_zip?(*)

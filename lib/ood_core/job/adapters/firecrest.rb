@@ -174,6 +174,16 @@ module OodCore
             parse_response(response, "output")
           end
 
+          def file_info(target_path)
+            params = { 'targetPath' => target_path }
+            response = http_get(
+              "#{@firecrest_uri}/utilities/file",
+              headers: build_headers,
+              params: params
+            )
+            parse_response(response, "output")
+          end
+
           def mkdir(target_path, create_intermediate_dirs: false)
             data = { "targetPath" => target_path }
             data["p"] = create_intermediate_dirs if create_intermediate_dirs
