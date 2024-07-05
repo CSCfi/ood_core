@@ -184,6 +184,29 @@ module OodCore
             parse_response(response, "output")
           end
 
+          def download(source_path, &block)
+            params = { 'sourcePath' => source_path }
+            http_get(
+              "#{@firecrest_uri}/utilities/download",
+              headers: build_headers,
+              params: params
+            ) do |response|
+              return response.read_body(&block)
+            end
+          end
+
+          def xfer_download(source_path)
+            data = { 'sourcePath' => source_path }
+            response = http_post(
+              "#{@firecrest_uri}/storage/xfer-external/download",
+              headers: build_headers,
+              data: data
+            )
+            task_id = parse_response(response, "task_id")
+            result = wait_task_result(task_id, 117)
+            result["url"]
+          end
+
           def mkdir(target_path, create_intermediate_dirs: false)
             data = { "targetPath" => target_path }
             data["p"] = create_intermediate_dirs if create_intermediate_dirs
@@ -328,7 +351,7 @@ module OodCore
             { 'Authorization' => "Bearer #{token}", 'X-Machine-Name' => @machine }
           end
 
-          def http_get(url, headers: {}, params: {}, max_retries: 5)
+          def http_get(url, headers: {}, params: {}, max_retries: 5, &block)
             uri = URI(url)
             uri.query = URI.encode_www_form(params) unless params.empty?
             request = Net::HTTP::Get.new(uri)
@@ -336,17 +359,23 @@ module OodCore
             retries = 0
             while retries <= max_retries
               response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
-                http.request(request)
-              end
-
-              if response.code.to_i == 429
-                retry_after = response['RateLimit-Reset'].to_i
-                sleep(retry_after > 0 ? retry_after : 1)
-                retries += 1
-              elsif response.code.to_i >= 400
-                raise HttpError, "Error: #{response.code} #{response.body}"
-              else
-                return response
+                http.request(request) do |response|
+                  if response.code.to_i == 429
+                    retry_after = response['RateLimit-Reset'].to_i
+                    sleep(retry_after > 0 ? retry_after : 1)
+                    retries += 1
+                  elsif response.code.to_i >= 400
+                    raise HttpError, "Error: #{response.code} #{response.body}"
+                  else
+                    if block_given?
+                      yield response
+                      return
+                    else
+                      response.read_body
+                      return response
+                    end
+                  end
+                end
               end
             end
           end
@@ -453,7 +482,7 @@ module OodCore
               sleep 1
               task = get_task(task_id)
             end
-            raise TaskError, "Error in task: #{task['data']}" if task["status"].to_i >= 400
+            raise TaskError, "Error in task: #{task['data']}" if task["status"].to_i > final_status
             task["data"]
           end
 
