@@ -417,124 +417,79 @@ module OodCore
             { 'Authorization' => "Bearer #{token}", 'X-Machine-Name' => @machine }
           end
 
-          def http_get(url, headers: {}, params: {}, max_retries: 5, &block)
-            uri = URI(url)
-            uri.query = URI.encode_www_form(params) unless params.empty?
-            request = Net::HTTP::Get.new(uri)
-            headers.each { |key, value| request[key] = value }
-            retries = 0
-            while retries <= max_retries
-              response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
+          def request_with_retries(request, uri: request.uri, max_retries: 5, &block)
+            http = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
+              retries = 0
+              while retries <= max_retries
                 http.request(request) do |response|
                   if response.code.to_i == 429
                     retry_after = response['RateLimit-Reset'].to_i
                     sleep(retry_after > 0 ? retry_after : 1)
                     retries += 1
                   elsif response.code.to_i >= 400
-                    raise HttpError, "Error: #{response.code} #{response.body}"
+                    raise HttpError, "Error: #{response.code}: #{response.body}"
+                  elsif block_given?
+                    yield response
+                    return
                   else
-                    if block_given?
-                      yield response
-                      return
-                    else
-                      response.read_body
-                      return response
-                    end
+                    response.read_body
+                    return response
                   end
                 end
               end
             end
+            raise HttpError, "Maximum number of retries reached for #{request.uri}"
+          end
+
+          def http_get(url, headers: {}, params: {}, max_retries: 5, &block)
+            uri = URI(url)
+            uri.query = URI.encode_www_form(params) unless params.empty?
+            request = Net::HTTP::Get.new(uri)
+            headers.each { |key, value| request[key] = value }
+            request_with_retries(request, &block)
           end
 
           def http_delete(url, headers: {}, max_retries: 5)
             uri = URI(url)
             request = Net::HTTP::Delete.new(uri)
             headers.each { |key, value| request[key] = value }
-
-            retries = 0
-            while retries <= max_retries
-              response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
-                http.request(request)
-              end
-
-              if response.code.to_i == 429
-                retry_after = response['RateLimit-Reset'].to_i
-                sleep(retry_after > 0 ? retry_after : 1)
-                retries += 1
-              elsif response.code.to_i >= 400
-                raise HttpError, "Error: #{response.code} #{response.body}"
-              else
-                return response
-              end
-            end
+            request_with_retries(request)
           end
 
           def http_post(url, headers:, data: {}, files: {}, max_retries: 5)
             uri = URI.parse(url)
 
-            retries = 0
-            while retries <= max_retries
-              # Prepare the form data, including files
-              form_data = data
-              files.each do |key, file_path|
-                form_data["file"] ||= []
-                if file_path.kind_of?(IO) || file_path.kind_of?(StringIO)
-                  file_path.rewind # Reset (String)IO pointer
-                  form_data["file"].push(Multipart::Post::UploadIO.new(file_path, 'application/octet-stream', key))
-                else
-                  form_data["file"].push(Multipart::Post::UploadIO.new(File.open(file_path), 'application/octet-stream', File.basename(file_path)))
-                end
-              end
-
-              request = Net::HTTP::Post::Multipart.new(uri.path, form_data)
-              headers.each do |key, value|
-                request[key] = value
-              end
-
-              response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
-                http.request(request)
-              end
-
-              if response.code.to_i == 429
-                retry_after = response['RateLimit-Reset'].to_i
-                sleep(retry_after > 0 ? retry_after : 1)
-                retries += 1
-              elsif response.code.to_i >= 400
-                raise HttpError, "Error: #{response.code} #{response.body}"
+            # Prepare the form data, including files
+            form_data = data
+            files.each do |key, file_path|
+              form_data["file"] ||= []
+              if file_path.kind_of?(IO) || file_path.kind_of?(StringIO)
+                file_path.rewind # Reset (String)IO pointer
+                form_data["file"].push(Multipart::Post::UploadIO.new(file_path, 'application/octet-stream', key))
               else
-                return response
+                form_data["file"].push(Multipart::Post::UploadIO.new(File.open(file_path), 'application/octet-stream', File.basename(file_path)))
               end
             end
+
+            request = Net::HTTP::Post::Multipart.new(uri.path, form_data)
+            headers.each do |key, value|
+              request[key] = value
+            end
+            request_with_retries(request, uri: uri)
           end
 
           def http_put(url, headers: {}, data: {}, max_retries: 5)
             uri = URI.parse(url)
 
-            retries = 0
-            while retries <= max_retries
-              # Prepare the form data
-              form_data = data
+            # Prepare the form data
+            form_data = data
 
-              request = Net::HTTP::Put.new(uri.path)
-              request.set_form_data(form_data)
-              headers.each do |key, value|
-                request[key] = value
-              end
-
-              response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
-                http.request(request)
-              end
-
-              if response.code.to_i == 429
-                retry_after = response['RateLimit-Reset'].to_i
-                sleep(retry_after > 0 ? retry_after : 1)
-                retries += 1
-              elsif response.code.to_i >= 400
-                raise HttpError, "Error: #{response.code} #{response.body}"
-              else
-                return response
-              end
+            request = Net::HTTP::Put.new(uri.path)
+            request.set_form_data(form_data)
+            headers.each do |key, value|
+              request[key] = value
             end
+            request_with_retries(request)
           end
 
           def parse_response(response, key)
