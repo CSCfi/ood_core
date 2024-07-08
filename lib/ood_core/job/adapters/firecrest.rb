@@ -45,6 +45,7 @@ module OodCore
           class TokenError < Error; end
           class HttpError < Error; end
           class TaskError < Error; end
+          class FileTransferError < Error; end
 
           # Access tokens re-used while they are valid.
           @@token = {}
@@ -229,10 +230,15 @@ module OodCore
               data: data
             )
             parse_response(response, "output")
+          rescue => e
+            if e.message.include?("Command has finished with timeout signal")
+              internal_transfer("mv", source_path: source_path, target_path: target_path)
+            else
+              raise e
+            end
           end
 
           def cp(source_path, target_path)
-            #TODO handle larger files through a job
             data = {
               "sourcePath" => source_path,
               "targetPath" => target_path
@@ -243,6 +249,66 @@ module OodCore
               data: data
             )
             parse_response(response, "output")
+          rescue => e
+            if e.message.include?("Command has finished with timeout signal")
+              internal_transfer("rsync", source_path: source_path, target_path: target_path)
+            else
+              raise e
+            end
+          end
+
+          def rm(target_path)
+            data = { "targetPath" => target_path }
+            response = http_delete(
+              "#{@firecrest_uri}/utilities/rm",
+              headers: build_headers,
+              data: data
+            )
+          rescue => e
+            if e.message.include?("Command has finished with timeout signal")
+              internal_transfer("rm", target_path: target_path)
+            else
+              raise e
+            end
+          end
+
+          def internal_transfer(transfer_type, source_path: nil, target_path: nil)
+            # transfer_type: "rsync" or "mv" or "rm"
+            data = {
+              "targetPath" => target_path
+            }
+            # sourcePath is not needed for "rm" transfer type
+            data["sourcePath"] = source_path if source_path
+            response = http_post(
+              "#{@firecrest_uri}/storage/xfer-internal/#{transfer_type}",
+              headers: build_headers,
+              data: data
+            )
+            task_id = parse_response(response, "task_id")
+            job_info = wait_task_result(task_id, 200)
+            transfer_job_id = job_info["jobid"]
+            output_file = job_info["job_file_err"]
+
+            Rails.logger.info("Transfer job (#{transfer_job_id}) started, with output file is #{output_file}.")
+
+            # Wait for the transfer job to finish
+            while true
+              jobs = get_jobs(job_ids: [transfer_job_id])
+              break if slurm_state_to_ood_state(jobs[0]['state']) == :completed
+              # TODO: change this to maybe exponential backoff (?)
+              sleep 1
+            end
+            if jobs[0]['state'] == "COMPLETED"
+              if head(output_file) != ""
+                raise FileTransferError, "Error in file transfer: #{head(output_file)}. More details " \
+                                         "in #{output_file}"
+              end
+
+              return
+            end
+
+            raise FileTransferError, "Error in file transfer: Job (#{transfer_job_id}) finished with " \
+                                     "status #{jobs[0]['state']}"
           end
 
           STATE_MAP = {
