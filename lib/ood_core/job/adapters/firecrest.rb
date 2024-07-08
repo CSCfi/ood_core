@@ -164,6 +164,16 @@ module OodCore
             parse_response(response, "output")
           end
 
+          def head(target_path)
+            params = { 'targetPath' => target_path }
+            response = http_get(
+              "#{@firecrest_uri}/utilities/head",
+              headers: build_headers,
+              params: params
+            )
+            parse_response(response, "output")
+          end
+
           def list_files(target_path, show_hidden_files: false)
             params = { 'targetPath' => target_path }
             params["showhidden"] = show_hidden_files if show_hidden_files
@@ -449,9 +459,13 @@ module OodCore
             request_with_retries(request, &block)
           end
 
-          def http_delete(url, headers: {}, max_retries: 5)
+          def http_delete(url, headers: {}, data: {}, max_retries: 5)
             uri = URI(url)
+            # Prepare the form data
+            form_data = data
+
             request = Net::HTTP::Delete.new(uri)
+            request.set_form_data(form_data)
             headers.each { |key, value| request[key] = value }
             request_with_retries(request)
           end
