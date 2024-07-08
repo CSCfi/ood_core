@@ -34,6 +34,7 @@ module OodCore
         using Refinements::ArrayExtensions
 
         require "ood_core/job/adapters/firecrest/cluster_file"
+        require "ood_core/job/adapters/firecrest/cluster_transfer"
 
         # @api private
         class Batch
@@ -503,7 +504,7 @@ module OodCore
             headers.each do |key, value|
               request[key] = value
             end
-            request_with_retries(request)
+            request_with_retries(request, uri: uri)
           end
 
           def parse_response(response, key)
@@ -539,6 +540,10 @@ module OodCore
 
         def cluster_file(path)
           ClusterFile.new(path, @firecrest)
+        end
+
+        def cluster_transfer(action:, files:)
+          ClusterTransfer.build(action: action, files: files, adapter: @firecrest)
         end
 
         # Submit a job with the attributes defined in the job template instance
