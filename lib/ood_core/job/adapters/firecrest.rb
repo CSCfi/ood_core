@@ -21,8 +21,7 @@ module OodCore
         c = config.to_h.symbolize_keys
         machine              = c.fetch(:machine, nil)
         endpoint             = c.fetch(:endpoint, nil)
-        xfer_machine         = c.fetch(:xfer_machine, nil)
-        firecrest = Adapters::FirecREST::Batch.new(machine: machine, endpoint: endpoint, xfer_machine: xfer_machine)
+        firecrest = Adapters::FirecREST::Batch.new(machine: machine, endpoint: endpoint)
         Adapters::FirecREST.new(firecrest: firecrest)
       end
     end
@@ -58,7 +57,6 @@ module OodCore
           def initialize(machine: nil, endpoint: nil, xfer_machine: nil)
             @machine              = machine && machine.to_s
             @firecrest_uri        = endpoint && endpoint.to_s
-            @xfer_machine         = xfer_machine && xfer_machine.to_s || @machine
             @client_id            = ENV['FIRECREST_CLIENT_ID']
             @client_secret        = ENV['FIRECREST_CLIENT_SECRET']
             @token_uri            = ENV['FIRECREST_TOKEN_URI']
@@ -99,10 +97,10 @@ module OodCore
             res = wait_task_result(task_id, 200).values
           end
 
-          def get_jobs(job_ids: [], xfer_request: false)
+          def get_jobs(job_ids: [], machine_name: nil)
             job_ids_str = job_ids.join(',')
             params = !job_ids.empty? ? { "jobs" => job_ids_str } : {}
-            response = http_get("#{@firecrest_uri}/compute/acct", headers: build_headers(xfer_request), params: params)
+            response = http_get("#{@firecrest_uri}/compute/acct", headers: build_headers(machine_name: machine_name), params: params)
             task_id = parse_response(response, "task_id")
             # The task endpoint doesn't take into account the machine
             res = wait_task_result(task_id, 200)
@@ -168,11 +166,11 @@ module OodCore
             parse_response(response, "output")
           end
 
-          def head(target_path, xfer_file: false)
+          def head(target_path, machine_name: nil)
             params = { 'targetPath' => target_path }
             response = http_get(
               "#{@firecrest_uri}/utilities/head",
-              headers: build_headers(xfer_file),
+              headers: build_headers(machine_name: machine_name),
               params: params
             )
             parse_response(response, "output")
@@ -299,6 +297,7 @@ module OodCore
               data: data
             )
             task_id = parse_response(response, "task_id")
+            xfer_machine_name = get_task(task_id)["system"]
             job_info = wait_task_result(task_id, 200)
             transfer_job_id = job_info["jobid"]
             output_file = job_info["job_file_err"]
@@ -307,13 +306,13 @@ module OodCore
 
             # Wait for the transfer job to finish
             while true
-              jobs = get_jobs(job_ids: [transfer_job_id], xfer_request: true)
+              jobs = get_jobs(job_ids: [transfer_job_id], machine_name: xfer_machine_name)
               break if slurm_state_to_ood_state(jobs[0]['state']) == :completed
               # TODO: change this to maybe exponential backoff (?)
               sleep 1
             end
             if jobs[0]['state'] == "COMPLETED"
-              if head(output_file, xfer_request: true) != ""
+              if head(output_file, machine_name: xfer_machine_name) != ""
                 raise FileTransferError, "Error in file transfer: #{head(output_file)}. More details " \
                                          "in #{output_file}"
               end
@@ -427,9 +426,9 @@ module OodCore
             raise TokenError, "Token error: #{e.message}"
           end
 
-          def build_headers(xfer_request = false)
-            machine_name = xfer_request ? @xfer_machine : @machine
-            { 'Authorization' => "Bearer #{token}", 'X-Machine-Name' => @machine }
+          def build_headers(machine_name: nil)
+            m = machine_name.nil? ? @machine : machine_name
+            { 'Authorization' => "Bearer #{token}", 'X-Machine-Name' => m }
           end
 
           def request_with_retries(request, uri: request.uri, max_retries: 5, &block)
