@@ -51,7 +51,7 @@ class OodCore::Job::Adapters::FirecREST::ClusterFile
   end
 
   def editable?
-    false
+    !directory?
   end
 
   def read(&block)
@@ -59,15 +59,19 @@ class OodCore::Job::Adapters::FirecREST::ClusterFile
   end
 
   def touch
+    adapter.upload(path, content: "")
   end
 
   def mkdir
+    adapter.mkdir(path)
   end
 
   def write(content)
+    adapter.upload(path, content:)
   end
 
   def handle_upload(tempfile)
+    adapter.upload(path, source_path: tempfile)
   end
 
   def mime_type

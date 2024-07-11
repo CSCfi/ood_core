@@ -126,6 +126,19 @@ module OodCore
             end
           end
 
+          def upload(target_path, source_path: nil, content: nil)
+            file = source_path.presence || StringIO.new(content)
+            target = File.dirname(target_path.to_s)
+            mkdir(target, create_intermediate_dirs: true)
+            response = http_post(
+              "#{@firecrest_uri}/utilities/upload",
+              headers: build_headers,
+              data: { targetPath: target },
+              files: { File.basename(target_path) => file }
+            )
+            parse_response(response, "output")
+          end
+
           # Stage job files to the cluster.
           def stage(src, dst)
             # Add all files for job to a tar file, and upload it.
@@ -145,20 +158,8 @@ module OodCore
                 end
               end
             end
-            parse_response(http_post(
-              "#{@firecrest_uri}/utilities/mkdir",
-              headers: build_headers,
-              data: {
-                targetPath: dst.to_s,
-                p: "true"
-              }
-            ), "output")
-            parse_response(http_post(
-              "#{@firecrest_uri}/utilities/upload",
-              headers: build_headers,
-              data: { targetPath: dst.to_s },
-              files: { "file" => "#{src_path}.tar" }
-            ), "output")
+            mkdir(dst.to_s, create_intermediate_dirs: true)
+            upload(dst.to_s, source_path: "#{src_path}.tar")
           end
 
           def view(file)
