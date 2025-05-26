@@ -22,7 +22,7 @@ module OodCore
         #
         # @return cmd [String] command wrapped in ssh if submit_host is present
         # @return args [Array] command arguments including ssh_flags and original command
-        def self.ssh_wrap(submit_host, cmd, cmd_args, strict_host_checking = true, env = {})
+        def self.ssh_wrap(submit_host, cmd, cmd_args, strict_host_checking = true, env = {}, bin = nil, bin_overrides = {})
           return cmd, cmd_args if submit_host.to_s.empty?
 
           check_host = strict_host_checking ? "yes" : "no"
@@ -30,8 +30,8 @@ module OodCore
           # Have to OodCore::Job::Adapters::Helper.ssh_port instead of self.ssh_port due to test failure
           args = ['-p', OodCore::Job::Adapters::Helper.ssh_port, '-o', 'BatchMode=yes', '-o', 'UserKnownHostsFile=/dev/null', '-o', "StrictHostKeyChecking=#{check_host}", "#{submit_host}"]
           env.each{|key, value| args.push("export #{key}=#{value};")}
-
-          return 'ssh', args + [cmd] + cmd_args
+          ssh = OodCore::Job::Adapters::Helper.bin_path('ssh', bin, bin_overrides)
+          return ssh, args + [cmd] + cmd_args
         end
 
         # Allows for Non-Standard Port usage in ssh commands

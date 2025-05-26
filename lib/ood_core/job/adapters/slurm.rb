@@ -497,7 +497,7 @@ module OodCore
               env = env.to_h
               env["SLURM_CONF"] = conf.to_s if conf
 
-              cmd, args = OodCore::Job::Adapters::Helper.ssh_wrap(submit_host, cmd, args, strict_host_checking)
+              cmd, args = OodCore::Job::Adapters::Helper.ssh_wrap(submit_host, cmd, args, strict_host_checking, {}, bin, bin_overrides)
               o, e, s = Open3.capture3(env, cmd, *(args.map(&:to_s)), stdin_data: stdin.to_s)
               s.success? ? interpret_and_raise(o, e) : raise(Error, e)
             end
