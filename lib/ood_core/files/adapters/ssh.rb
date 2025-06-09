@@ -77,7 +77,7 @@ module OodCore
         end
 
         def directory?(path)
-          stdout, stderr, status = call('stat', '--format', '%F', Shellwords.escape(path))
+          stdout, stderr, status = call('stat', '--dereference', '--format', '%F', Shellwords.escape(path))
           if status.success?
             stdout.strip == 'directory'
           elsif status.exitstatus == 1
@@ -182,7 +182,7 @@ module OodCore
         end
 
         def size(path)
-          stdout, stderr, status = call('stat', '--format', '%s', Shellwords.escape(path))
+          stdout, stderr, status = call('stat', '--dereference', '--format', '%s', Shellwords.escape(path))
           if status.success?
             stdout.to_i
           elsif status.exitstatus == 1
@@ -193,7 +193,7 @@ module OodCore
         end
 
         def mime_type(path)
-          stdout, stderr, status = call('file', '-Eb', '--mime-type', Shellwords.escape(path))
+          stdout, stderr, status = call('file', '--dereference', '-Eb', '--mime-type', Shellwords.escape(path))
           unless status.success?
             err = stdout.blank? ? stderr : stdout
             raise StandardError, "Could not check file type of #{path}: #{err}"
