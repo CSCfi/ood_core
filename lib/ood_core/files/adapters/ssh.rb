@@ -10,7 +10,7 @@ module OodCore
       def self.build_ssh(config)
         c = config.to_h.symbolize_keys
         host = c.fetch(:host, nil)
-        bin_overrides = c.fetch(:bin_overrides, nil)
+        bin_overrides = c.fetch(:bin_overrides, {})
         Adapters::Ssh.new(host: host, bin_overrides: bin_overrides)
       end
     end
@@ -26,6 +26,7 @@ module OodCore
         }.freeze
 
         LS_REGEX = Regexp.new('^(?<type>[ld-])(?<perms>\S{9})(?<acl>\S?)\s+(?<nlinks>\d+)\s+(?<user>\S+)\s+(?<group>\S+)\s+(?<size>\d+)\s+(?<time>\S+)\s+"(?<name>.+)"$')
+        PROGRESS_REGEX = /\s*\d+\s+(?<progress>\d+)%/.freeze
 
         attr_reader :host, :bin_overrides
 
@@ -53,6 +54,57 @@ module OodCore
           args = args.map(&:to_s)
           cmd, args = OodCore::Job::Adapters::Helper.ssh_wrap(host, cmd, args, false, {}, nil, bin_overrides)
           Open3.capture3(env, cmd, *args.map(&:to_s), stdin_data: stdin.to_s)
+        end
+
+        def rsync(*args, env: {}, stdin: '')
+          args = args.map(&:to_s)
+          ssh_cmd, ssh_args = OodCore::Job::Adapters::Helper.ssh_wrap(host, nil, [], false, {}, nil, bin_overrides)
+          rsync = OodCore::Job::Adapters::Helper.bin_path('rsync', '', bin_overrides)
+          ssh_args = ssh_args[0..-3]
+          args = ['-e', "#{Shellwords.escape(ssh_cmd)} #{ssh_args.join(' ')}"] + args
+          Open3.capture3(env, rsync, *args.map(&:to_s), stdin_data: stdin.to_s)
+        end
+
+        def rsync_popen(*args, stdin_data: nil, &block)
+          args = args.map(&:to_s)
+          ssh_cmd, ssh_args = OodCore::Job::Adapters::Helper.ssh_wrap(host, nil, [], false, {}, nil, bin_overrides)
+          rsync = OodCore::Job::Adapters::Helper.bin_path('rsync', '', bin_overrides)
+          ssh_args = ssh_args[0..-3]
+          args = ['-e', "#{Shellwords.escape(ssh_cmd)} #{ssh_args.join(' ')}"] + args
+
+          Open3.popen3(rsync, *args.map(&:to_s)) do |i, o, e, t|
+            i.write(stdin_data) if stdin_data
+            i.close
+
+            err_reader = Thread.new { e.read }
+
+            yield o
+
+            o.close
+            exit_status = t.value
+            err = err_reader.value.to_s.strip
+            if err.present? || !exit_status.success?
+              raise StandardError.new(exit_status.exitstatus), "rsync exited with status #{exit_status.exitstatus}\n#{err}"
+            end
+          end
+        end
+
+        def rsync_with_progress(src, dst, src_fs: nil, dest_fs: nil, move: false)
+          full_src = src
+          full_dst = dst
+          full_src = "#{src_fs}:#{src}" if src_fs
+          full_dst = "#{dest_fs}:#{dst}" if dest_fs
+          dir = src_fs ? directory?(src) : File.directory?(src)
+          full_src = "#{full_src}/" if dir
+          rsync_popen(*['-a', '--partial', '--info=all0,progress2', move ? '--remove-source-files' : nil, full_src, full_dst].compact) do |o|
+            o.each_line("\r") do |line|
+              match = line.match(PROGRESS_REGEX)
+              next unless match
+
+              progress = match[:progress].to_i
+              yield progress
+            end
+          end
         end
 
         def call_popen(cmd, *args, env: {}, stdin: nil)
@@ -116,10 +168,6 @@ module OodCore
             escaped_name, size, type, time, user, perms = match.named_captures.values_at('name', 'size', 'type', 'time',
                                                                                          'user', 'perms')
             name = unescape(escaped_name).force_encoding('utf-8')
-
-            # Ignore file names non-utf8 (valid file names, but other parts of OOD can't handle them).
-            next unless name.valid_encoding?
-
             {
               id:           File.join(path, name),
               name:         name,
@@ -209,6 +257,58 @@ module OodCore
           else
             type
           end
+        end
+
+        def mv(src, dst)
+          stdout, stderr, status = call('mv', Shellwords.escape(src), Shellwords.escape(dst))
+          return if status.success?
+
+          err = stdout.blank? ? stderr : stdout
+          raise StandardError, "Could not move #{src} to #{dst}: #{err}"
+        end
+
+        def cp(src, dst)
+          stdout, stderr, status = call('cp', '-r', Shellwords.escape(src), Shellwords.escape(dst))
+          return if status.success?
+
+          err = stdout.blank? ? stderr : stdout
+          raise StandardError, "Could not copy #{src} to #{dst}: #{err}"
+        end
+
+        def remove(path)
+          stdout, stderr, status = call('rm', '-r', Shellwords.escape(path))
+          return if status.success?
+
+          err = stdout.blank? ? stderr : stdout
+          raise StandardError, "Could not remove #{path}: #{err}"
+        end
+
+        def move_with_progress(src_fs, dest_fs, src, dst, &block)
+          # use rsync for local<->cluster and mv for cluster<->cluster
+          from_cluster = src_fs.respond_to?(:file_adapter) && src_fs.file_adapter.instance_of?(self.class)
+          to_cluster = dest_fs.respond_to?(:file_adapter) && dest_fs.file_adapter.instance_of?(self.class)
+          within_cluster = from_cluster && to_cluster
+          if within_cluster
+            mv(src, dst, &block)
+          else
+            rsync_with_progress(src, dst, src_fs: from_cluster && host, dest_fs: to_cluster && host, move: true, &block)
+          end
+        end
+
+        def copy_with_progress(src_fs, dest_fs, src, dst, &block)
+          # use rsync for local<->cluster and cp for cluster<->cluster
+          from_cluster = src_fs.respond_to?(:file_adapter) && src_fs.file_adapter.instance_of?(self.class)
+          to_cluster = dest_fs.respond_to?(:file_adapter) && dest_fs.file_adapter.instance_of?(self.class)
+          within_cluster = from_cluster && to_cluster
+          if within_cluster
+            cp(src, dst, &block)
+          else
+            rsync_with_progress(src, dst, src_fs: from_cluster && host, dest_fs: to_cluster && host, move: false, &block)
+          end
+        end
+
+        def remove_with_progress(path, &block)
+          rm(path)
         end
       end
     end

@@ -35,7 +35,6 @@ module OodCore
           unless respond_to?(adapter_method)
             raise AdapterNotFound, "files configuration specifies nonexistent #{adapter} adapter"
           end
-          Rails.logger.info(c)
           send(adapter_method, c)
         end
       end
