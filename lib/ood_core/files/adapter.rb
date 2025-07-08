@@ -40,6 +40,18 @@ module OodCore
       def mime_type(path)
         raise NotImplementedError, 'files adapter did not define #mime_type'
       end
+
+      def move_with_progress(src_fs, dest_fs, src, dst, &block)
+        raise NotImplementedError, 'files adapter did not define #mime_type'
+      end
+
+      def copy_with_progress(src_fs, dest_fs, src, dst, &block)
+        raise NotImplementedError, 'files adapter did not define #mime_type'
+      end
+
+      def remove_with_progress(path, &block)
+        raise NotImplementedError, 'files adapter did not define #mime_type'
+      end
     end
   end
 end
