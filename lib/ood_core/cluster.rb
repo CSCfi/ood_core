@@ -120,6 +120,10 @@ module OodCore
       Files::Factory.build(file_config)
     end
 
+    def file_adapter?
+      !file_config.fetch(:adapter, '').empty?
+    end
+
     # Whether the job feature is allowed based on the ACLs
     # @return [Boolean] is the job feature allowed
     def job_allow?
