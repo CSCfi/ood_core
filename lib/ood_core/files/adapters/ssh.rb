@@ -11,7 +11,7 @@ module OodCore
         c = config.to_h.symbolize_keys
         host = c.fetch(:host, nil)
         bin_overrides = c.fetch(:bin_overrides, {})
-        Adapters::Ssh.new(host: host, bin_overrides: bin_overrides)
+        Adapters::Ssh.new(host: host, bin_overrides: bin_overrides, cluster_id: c.fetch(:cluster_id))
       end
     end
 
@@ -28,11 +28,12 @@ module OodCore
         LS_REGEX = Regexp.new('^(?<type>[ld-])(?<perms>\S{9})(?<acl>\S?)\s+(?<nlinks>\d+)\s+(?<user>\S+)\s+(?<group>\S+)\s+(?<size>\d+)\s+(?<time>\S+)\s+"(?<name>.+)"$')
         PROGRESS_REGEX = /\s*\d+\s+(?<progress>\d+)%/.freeze
 
-        attr_reader :host, :bin_overrides
+        attr_reader :host, :bin_overrides, :cluster_id
 
-        def initialize(host: nil, bin_overrides: {})
+        def initialize(host: nil, bin_overrides: {}, cluster_id: nil)
           @host = host
           @bin_overrides = bin_overrides
+          @cluster_id = cluster_id
           super
         end
 
@@ -102,7 +103,7 @@ module OodCore
               next unless match
 
               progress = match[:progress].to_i
-              yield progress
+              yield progress if block_given?
             end
           end
         end
@@ -128,15 +129,40 @@ module OodCore
           end
         end
 
-        def directory?(path)
+        # Dataroot for the cluster, where interactive app sessions (and more) will be staged.
+        def dataroot
+          # Cache dataroot based on the cluster ID.
+          @@dataroot ||= Hash.new do |h, cluster|
+            stdout, stderr, status = call('echo', '$HOME')
+            if !status.success? && stdout == ''
+              raise StandardError, "Could not get dataroot for cluster"
+            end
+            # TODO: Avoid duplicating this logic from ood_appkit?
+            h[cluster] = Pathname.new(stdout.strip).join(ENV['OOD_PORTAL'] || 'ondemand', 'data', ENV.fetch('APP_TOKEN', 'sys/dashboard'))
+          end
+         @@dataroot[cluster_id]
+        end
+
+        def stat(path)
           stdout, stderr, status = call('stat', '--dereference', '--format', '%F', Shellwords.escape(path))
           if status.success?
-            stdout.strip == 'directory'
+            stdout.strip
           elsif status.exitstatus == 1
             raise StandardError, "Path does not exist: #{path}"
           else
             raise StandardError, "Could not stat #{path}: #{stderr}"
           end
+        end
+
+        def directory?(path)
+          return stat(path) == "directory"
+        end
+
+        def exist?(path)
+          stat(path)
+          true
+        rescue StandardError
+          false
         end
 
         # Parses permissions in rwxrwxrwx format into octal mode.
@@ -214,7 +240,7 @@ module OodCore
         end
 
         def mkdir(path)
-          stdout, stderr, status = call('mkdir', Shellwords.escape(path))
+          stdout, stderr, status = call('mkdir', '-p', Shellwords.escape(path))
           return if status.success?
 
           err = stdout.blank? ? stderr : stdout
