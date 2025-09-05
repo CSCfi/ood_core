@@ -117,7 +117,7 @@ module OodCore
     end
 
     def file_adapter
-      Files::Factory.build(file_config)
+      Files::Factory.build(file_config.merge({ cluster_id: id }))
     end
 
     def file_adapter?

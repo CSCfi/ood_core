@@ -5,8 +5,20 @@ module OodCore
     class Adapter
       def initialize(*); end
 
+      def dataroot
+        raise NotImplementedError, 'files adapter did not define #dataroot'
+      end
+
+      def stat(path)
+        raise NotImplementedError, 'files adapter did not define #stat'
+      end
+
       def directory?(path)
         raise NotImplementedError, 'files adapter did not define #directory?'
+      end
+
+      def exist?(path)
+        raise NotImplementedError, 'files adapter did not define #stat'
       end
 
       def ls(path)
