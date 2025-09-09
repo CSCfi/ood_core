@@ -301,7 +301,7 @@ module OodCore
           raise StandardError, "Could not copy #{src} to #{dst}: #{err}"
         end
 
-        def remove(path)
+        def rm(path)
           stdout, stderr, status = call('rm', '-r', Shellwords.escape(path))
           return if status.success?
 
